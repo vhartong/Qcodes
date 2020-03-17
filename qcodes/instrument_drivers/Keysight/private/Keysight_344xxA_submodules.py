@@ -1,8 +1,10 @@
 import textwrap
-import numpy as np
 from contextlib import ExitStack
 from functools import partial
-from typing import Sequence
+from typing import Sequence, Tuple
+from distutils.version import LooseVersion
+
+import numpy as np
 
 import qcodes.utils.validators as vals
 from qcodes import VisaInstrument, InstrumentChannel
@@ -119,7 +121,7 @@ class Trigger(InstrumentChannel):
                 it buffers one trigger.""")
         _trigger_source_vals = vals.Enum('IMM', 'EXT', 'BUS')
 
-        if self.parent.is_34465A_34470A and self.parent.has_DIG:
+        if self.parent.has_DIG:
             _trigger_source_vals = vals.Enum('IMM', 'EXT', 'BUS', 'INT')
             # extra empty lines are needed for readability of the docstring
             _trigger_source_docstring += textwrap.dedent("""\
@@ -149,11 +151,11 @@ class Sample(InstrumentChannel):
         super(Sample, self).__init__(parent, name, **kwargs)
 
         if self.parent.is_34465A_34470A:
-            _max_sample_count = 1e9
+            _max_sample_count = int(1e9)
         elif self.parent.model == "34410A":
             _max_sample_count = 50_000
         else:
-            _max_sample_count = 1e6
+            _max_sample_count = int(1e6)
 
         self.add_parameter('count',
                            label='Sample Count',
@@ -172,18 +174,29 @@ class Sample(InstrumentChannel):
             option) or 2,000,000 readings (with the MEM option)"""))
 
         if self.parent.has_DIG:
+            if self.parent.has_MEM:
+                _max_pretrig_count = int(2e6) - 1
+            else:
+                _max_pretrig_count = int(5e4) - 1
+
             self.add_parameter('pretrigger_count',
                                label='Sample Pretrigger Count',
                                set_cmd='SAMPle:COUNt:PRETrigger {}',
                                get_cmd='SAMPle:COUNt:PRETrigger?',
                                vals=vals.MultiType(
-                                   vals.Numbers(0, 2e6 - 1),
+                                   vals.Numbers(0, _max_pretrig_count),
                                    vals.Enum('MIN', 'MAX', 'DEF')),
                                get_parser=int,
                                docstring=textwrap.dedent("""\
                 Allows collection of the data being digitized the trigger.
                 Reserves memory for pretrigger samples up to the specified
-                num. of pretrigger samples."""))
+                num. of pretrigger samples.
+
+                Note that the maximum number of pretrigger counts is bounded
+                by the current number of sample counts as specified via the
+                ``sample.count`` parameter. Refer to the doc of the
+                ``sample.count`` parameter for information on the maximum
+                number of sample counts."""))
 
         if self.parent.is_34465A_34470A:
             self.add_parameter('source',
@@ -290,7 +303,7 @@ class Display(InstrumentChannel):
         self.text.get()  # also update the parameter value
 
 
-class TimeTrace(ParameterWithSetpoints):
+class TimeTrace(ParameterWithSetpoints): # pylint: disable=abstract-method
     """
     A parameter class that holds the data for a time trace type measurement,
     i.e. a measurement of N voltage or current values measured at fixed time
@@ -373,7 +386,7 @@ class TimeTrace(ParameterWithSetpoints):
 
         return data
 
-    def get_raw(self) -> np.ndarray:  # pylint: disable=E0202
+    def get_raw(self) -> np.ndarray:  # pylint: disable=method-hidden
 
         self._validate_dt()
         self._set_units_and_labels()
@@ -382,14 +395,17 @@ class TimeTrace(ParameterWithSetpoints):
         return data
 
 
-class TimeAxis(Parameter):
+class TimeAxis(Parameter): # pylint: disable=abstract-method
     """
     A simple :class:`.Parameter` that holds all the times (relative to the
     measurement start) at which the points of the time trace were acquired.
     """
 
-    def get_raw(self) -> np.ndarray:  # pylint: disable=E0202
-
+    def get_raw(self) -> np.ndarray:  # pylint: disable=method-hidden
+        """
+        Construct a time axis by querying the number of points and step size
+        from the instrument.
+        """
         if self.instrument is None:
            raise RuntimeError("No instrument attached to Parameter.")
 
@@ -438,7 +454,15 @@ class _Keysight_344xxA(KeysightErrorQueueMixin, VisaInstrument):
         ####################################
         # Instrument specifications
 
-        self.has_DIG = 'DIG' in self._licenses()
+        options = self._options()
+        self.has_DIG = self.is_34465A_34470A and (
+            'DIG' in options
+            or LooseVersion('A.03') <= LooseVersion(idn['firmware'])
+        )
+        # Note that the firmware version check is still needed because
+        # ``_options`` (the ``*OPT?`` command) returns 'DIG' option for
+        # firmware 3.0 only if it has been purchased before
+        self.has_MEM = self.is_34465A_34470A and 'MEM' in options
 
         PLCs = {'34410A': [0.006, 0.02, 0.06, 0.2, 1, 2, 10, 100],
                 '34460A': [0.02, 0.2, 1, 10, 100],
@@ -641,39 +665,48 @@ class _Keysight_344xxA(KeysightErrorQueueMixin, VisaInstrument):
         self.add_submodule('sample', Sample(self, 'sample'))
 
         ####################################
-        # Measuring parameter
+        # Measurement Parameters
+        # snapshot_get is disabled for each of these to prevent rapid mode
+        # changes on initialization or snapshot update, however the cached
+        # (last read) value will still be stored in the snapshot.
 
         self.add_parameter('volt',
                            get_cmd=partial(self._get_parameter, "DC Voltage"),
                            label='Voltage',
-                           unit='V')
+                           unit='V',
+                           snapshot_get=False)
 
         self.add_parameter('curr',
                            get_cmd=partial(self._get_parameter, "DC Current"),
                            label='Current',
-                           unit='A')
+                           unit='A',
+                           snapshot_get=False)
 
         self.add_parameter('ac_volt',
                            get_cmd=partial(self._get_parameter, "AC Voltage"),
                            label='AC Voltage',
-                           unit='V')
+                           unit='V',
+                           snapshot_get=False)
 
         self.add_parameter('ac_curr',
                            get_cmd=partial(self._get_parameter, "AC Current"),
                            label='AC Current',
-                           unit='A')
+                           unit='A',
+                           snapshot_get=False)
 
         self.add_parameter('res',
                            get_cmd=partial(self._get_parameter,
                                            "2 Wire Resistance"),
                            label='Resistance',
-                           unit='Ohms')
+                           unit='Ohms',
+                           snapshot_get=False)
 
         self.add_parameter('four_wire_res',
                            get_cmd=partial(self._get_parameter,
                                            "4 Wire Resistance"),
                            label='Resistance',
-                           unit='Ohms')
+                           unit='Ohms',
+                           snapshot_get=False)
 
         #####################################
         # Time trace parameters
@@ -756,9 +789,26 @@ class _Keysight_344xxA(KeysightErrorQueueMixin, VisaInstrument):
             return licenses_list
         return tuple()
 
+    def _options(self) -> Tuple[str, ...]:
+        """
+        Return enabled options of the DMM returned by ``*OPT?`` command.
+        The 34410A model does not have options, hence always returns
+        an empty tuple.
+
+        Note that for firmware version 3.0, output of ```*OPT?`` will contain
+        the ``DIG`` option only if it has been purchased before, although
+        the option itself is enabled by default in the firmware version 3.0.
+        """
+        if self.model != '34410A':
+            options_raw = self.ask('*OPT?')
+            options_list = [opt for opt in options_raw.split(',') if opt != '0']
+            return tuple(options_list)
+        return tuple()
+
     def _get_parameter(self, sense_function: str = "DC Voltage") -> float:
         """
-        Measure the parameter given by sense_function
+        Measure the parameter given by sense_function. In case of overload i.e.
+        when instrument throws +/-9.9e37, it is converted to +/-inf.
 
         Args:
             sense_function: The parameter to measure. Valid values are those
@@ -770,6 +820,11 @@ class _Keysight_344xxA(KeysightErrorQueueMixin, VisaInstrument):
         with self.sense_function.set_to(sense_function):
             with self.sample.count.set_to(1):
                 response = self.ask('READ?')
+
+        if float(response) >= 9.9e37:
+            return np.inf
+        elif float(response) <= -9.9e37:
+            return -np.inf
 
         return float(response)
 
@@ -804,13 +859,13 @@ class _Keysight_344xxA(KeysightErrorQueueMixin, VisaInstrument):
         return _raw_vals_to_array(raw_vals)
 
     def _set_apt_time(self, value: float) -> None:
-        self.write('SENSe:VOLTage:DC:APERture {:f}'.format(value))
+        self.write(f'SENSe:VOLTage:DC:APERture {value:f}')
 
         # setting aperture time switches aperture mode ON
         self.aperture_mode.get()
 
     def _set_NPLC(self, value: float) -> None:
-        self.write('SENSe:VOLTage:DC:NPLC {:f}'.format(value))
+        self.write(f'SENSe:VOLTage:DC:NPLC {value:f}')
 
         # resolution settings change with NPLC
         self.resolution.get()
@@ -820,10 +875,9 @@ class _Keysight_344xxA(KeysightErrorQueueMixin, VisaInstrument):
             self.aperture_mode.get()
 
     def _set_range(self, value: float):
-        self.write('SENSe:VOLTage:DC:RANGe {:f}'.format(value))
+        self.write(f'SENSe:VOLTage:DC:RANGe {value:f}')
 
         # resolution settings change with range
-
         self.resolution.get()
 
     def _set_resolution(self, value: float) -> None:
@@ -832,19 +886,16 @@ class _Keysight_344xxA(KeysightErrorQueueMixin, VisaInstrument):
         # convert both value*range and the resolution factors
         # to strings with few digits, so we avoid floating point
         # rounding errors.
-        res_fac_strs = ['{:.1e}'.format(v * rang)
-                        for v in self._resolution_factors]
-        if '{:.1e}'.format(value) not in res_fac_strs:
+        res_fac_strs = [f'{(v * rang):.1e}' for v in self._resolution_factors]
+        if f'{value:.1e}' not in res_fac_strs:
             raise ValueError(
-                'Resolution setting {:.1e} ({} at range {}) '
-                'does not exist. '
-                'Possible values are {}'.format(value, value, rang,
-                                                res_fac_strs))
+                f'Resolution setting {value:.1e}'
+                f'({value} at range {rang}) does not exist. '
+                f'Possible values are {res_fac_strs}')
 
-        self.write('VOLT:DC:RES {:.1e}'.format(value))
+        self.write(f'VOLT:DC:RES {value:.1e}')
 
         # NPLC settings change with resolution
-
         self.NPLC.get()
 
     def autorange_once(self) -> None:
@@ -861,7 +912,8 @@ def _raw_vals_to_array(raw_vals: str) -> np.ndarray:
     """
     Helper function that converts comma-delimited string of floating-point
     values to a numpy 1D array of them. Most data retrieval command of these
-    instruments return data in this format.
+    instruments return data in this format.In case of overload i.e.
+        when instrument throws +/-9.9e37, it is converted to +/-inf.
 
     Args:
         raw_vals: comma-delimited string of floating-point values
@@ -869,4 +921,7 @@ def _raw_vals_to_array(raw_vals: str) -> np.ndarray:
     Returns:
         numpy 1D array of data
     """
-    return np.array(list(map(float, raw_vals.split(','))))
+    result_array = np.fromstring(raw_vals, dtype=float, sep=",")
+    result_array[result_array >= 9.9e37] = np.inf
+    result_array[result_array <= -9.9e37] = -np.inf
+    return result_array

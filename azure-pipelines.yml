@@ -13,18 +13,23 @@ trigger:
   branches:
     include:
       - master
+      - release/*
   tags:
     include:
       - 'v*'
+pr:
+  branches:
+    include:
+      - '*' # workaround for missing trigger. Should be same as default
 
 jobs:
   - job: "run_the_tests"
     strategy:
       matrix:
         linux:
-          imageName: 'ubuntu-16.04'
+          imageName: 'ubuntu-latest'
         windows:
-          imageName: 'vs2017-win2016'
+          imageName: 'windows-latest'
     pool:
       vmImage: $(imageName)
 
@@ -161,6 +166,6 @@ jobs:
         displayName: "Build dist artifacts"
       - script: |
           source activate qcodes &&
-          twine upload -r "pypi" --config-file $(PYPIRC_PATH) dist/*
+          twine upload -r "qcodes" --config-file $(PYPIRC_PATH) dist/*
         condition: and(succeeded(), eq( variables['Agent.OS'], 'Linux' ), contains(variables['Build.SourceBranch'], 'refs/tags/'))
         displayName: "Upload tagged release to PyPi"
