@@ -624,10 +624,11 @@ class Runner:
         # next set up the "datasaver"
         if self.experiment is not None:
             self.ds = qc.new_data_set(
-                self.name, self.experiment.exp_id, conn=self.experiment.conn
+                self.name, self._write_in_background,
+                self.experiment.exp_id, conn=self.experiment.conn
             )
         else:
-            self.ds = qc.new_data_set(self.name)
+            self.ds = qc.new_data_set(self.name, self._write_in_background)
 
         # .. and give the dataset a snapshot as metadata
         if self.station is None:
@@ -647,7 +648,7 @@ class Runner:
         links = [Link(head=self.ds.guid, **pdict)
                  for pdict in self._parent_datasets]
         self.ds.parent_dataset_links = links
-        self.ds.mark_started(start_bg_writer=self._write_in_background)
+        self.ds.mark_started()
 
         # register all subscribers
         for (callble, state) in self.subscribers:

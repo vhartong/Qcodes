@@ -6,7 +6,7 @@ import os
 import time
 import uuid
 from queue import Empty, Queue
-from threading import Thread
+from threading import Thread, Lock
 from typing import (Any, Callable, Dict, List, Optional, Sequence, Sized,
                     Tuple, Union, TYPE_CHECKING, Mapping)
 
@@ -52,6 +52,7 @@ from qcodes.instrument.parameter import _BaseParameter
 from qcodes.utils.deprecate import deprecate
 
 log = logging.getLogger(__name__)
+db_queue_dict = {}
 
 
 # TODO: as of now every time a result is inserted with add_result the db is
@@ -209,11 +210,11 @@ class _BackgroundWriter(Thread):
     Write the results from the DataSet's dataqueue in a new thread
     """
 
-    def __init__(self, queue: Queue, conn: ConnectionPlus, table_name: str):
+    def __init__(self, conn: ConnectionPlus, queue: Queue):
         super().__init__()
+        self.lock = Lock()
         self.queue = queue
         self.path = conn.path_to_dbfile
-        self.table_name = table_name
         self.keep_writing = True
 
     def run(self) -> None:
@@ -221,18 +222,14 @@ class _BackgroundWriter(Thread):
         self.conn = connect(self.path)
 
         while self.keep_writing:
-
             item = self.queue.get()
-            if item['keys'] == 'stop':
-                self.keep_writing = False
-                self.conn.close()
-            else:
-                self.write_results(item['keys'], item['values'])
+            self.write_results(item['table'], item['keys'], item['values'])
             self.queue.task_done()
 
-    def write_results(self, keys: Sequence[str],
+    def write_results(self, table_name, keys: Sequence[str],
                       values: Sequence[List[Any]]) -> None:
-        insert_many_values(self.conn, self.table_name, keys, values)
+        with self.lock:
+            insert_many_values(self.conn, table_name, keys, values)
 
 class DataSet(Sized):
 
@@ -251,6 +248,7 @@ class DataSet(Sized):
                  conn: Optional[ConnectionPlus] = None,
                  exp_id: Optional[int] = None,
                  name: str = None,
+                 write_in_background: bool = False,
                  specs: Optional[SpecsOrInterDeps] = None,
                  values: Optional[VALUES] = None,
                  metadata: Optional[Mapping[str, Any]] = None) -> None:
@@ -271,6 +269,7 @@ class DataSet(Sized):
             exp_id: the id of the experiment in which to create a new run.
               Ignored if ``run_id`` is provided.
             name: the name of the dataset. Ignored if ``run_id`` is provided.
+            write_in_background: writing in background boolean
             specs: paramspecs belonging to the dataset. Ignored if ``run_id`` is
               provided.
             values: values to insert into the dataset. Ignored if ``run_id`` is
@@ -284,7 +283,15 @@ class DataSet(Sized):
         self.subscribers: Dict[str, _Subscriber] = {}
         self._interdeps: InterDependencies_
         self._parent_dataset_links: List[Link]
-        self._data_write_queue: Queue = Queue()
+        self.write_in_background = write_in_background
+        if 'queue' not in db_queue_dict.keys():
+            db_queue_dict['queue']: Queue = Queue()
+        self._data_write_queue: Queue = db_queue_dict['queue']
+        if 'writer' not in db_queue_dict.keys():
+            db_queue_dict['writer'] = _BackgroundWriter(self.conn, db_queue_dict['queue'])
+        self._bg_writer = db_queue_dict['writer']
+        if self.write_in_background and not self._bg_writer.isAlive():
+            self._bg_writer.start()
 
         if run_id is not None:
             if not run_exists(self.conn, run_id):
@@ -310,12 +317,13 @@ class DataSet(Sized):
                                      "You can start a new one with:"
                                      " new_experiment(name, sample_name)")
             name = name or "dataset"
-            _, run_id, __ = create_run(self.conn, exp_id, name,
-                                       generate_guid(),
-                                       parameters=None,
-                                       values=values,
-                                       metadata=metadata)
-            # this is really the UUID (an ever increasing count in the db)
+            with self._bg_writer.lock:
+                _, run_id, __ = create_run(self.conn, exp_id, name,
+                                           generate_guid(),
+                                           parameters=None,
+                                           values=values,
+                                           metadata=metadata)
+                # this is really the UUID (an ever increasing count in the db)
             self._run_id = run_id
             self._completed = False
             self._started = False
@@ -328,9 +336,6 @@ class DataSet(Sized):
             self._metadata = get_metadata_from_run_id(self.conn, self.run_id)
             self._parent_dataset_links = []
 
-        self._bg_writer = _BackgroundWriter(self._data_write_queue,
-                                            self.conn,
-                                            self.table_name)
 
     @property
     def run_id(self) -> int:
@@ -619,11 +624,12 @@ class DataSet(Sized):
             snapshot: the raw JSON dump of the snapshot
             overwrite: force overwrite an existing snapshot
         """
-        if self.snapshot is None or overwrite:
-            add_meta_data(self.conn, self.run_id, {'snapshot': snapshot})
-        elif self.snapshot is not None and not overwrite:
-            log.warning('This dataset already has a snapshot. Use overwrite'
-                        '=True to overwrite that')
+        with self._bg_writer.lock:
+            if self.snapshot is None or overwrite:
+                add_meta_data(self.conn, self.run_id, {'snapshot': snapshot})
+            elif self.snapshot is not None and not overwrite:
+                log.warning('This dataset already has a snapshot. Use overwrite'
+                            '=True to overwrite that')
 
     @property
     def pristine(self) -> bool:
@@ -664,7 +670,7 @@ class DataSet(Sized):
         if value:
             mark_run_complete(self.conn, self.run_id)
 
-    def mark_started(self, start_bg_writer: bool = False) -> None:
+    def mark_started(self) -> None:
         """
         Mark this :class:`.DataSet` as started. A :class:`.DataSet` that has been started can not
         have its parameters modified.
@@ -676,10 +682,11 @@ class DataSet(Sized):
                 database in a separate thread.
         """
         if not self._started:
-            self._perform_start_actions(start_bg_writer=start_bg_writer)
+            with self._bg_writer.lock:
+                self._perform_start_actions()
             self._started = True
 
-    def _perform_start_actions(self, start_bg_writer: bool) -> None:
+    def _perform_start_actions(self) -> None:
         """
         Perform the actions that must take place once the run has been started
         """
@@ -697,9 +704,6 @@ class DataSet(Sized):
         pdl_str = links_to_str(self._parent_dataset_links)
         update_parent_datasets(self.conn, self.run_id, pdl_str)
 
-        if start_bg_writer:
-            self._bg_writer.start()
-
     def mark_completed(self) -> None:
         """
         Mark :class:`.DataSet` as complete and thus read only and notify the subscribers
@@ -707,8 +711,8 @@ class DataSet(Sized):
         if self.pristine:
             raise RuntimeError('Can not mark DataSet as complete before it '
                                'has been marked as started.')
-
-        self._perform_completion_actions()
+        with self._bg_writer.lock:
+            self._perform_completion_actions()
         self.completed = True
 
     def _perform_completion_actions(self) -> None:
@@ -717,7 +721,7 @@ class DataSet(Sized):
         """
         for sub in self.subscribers.values():
             sub.done_callback()
-        self.terminate_queue()
+        # self.terminate_queue()
 
     @deprecate(alternative='mark_completed')
     def mark_complete(self) -> None:
@@ -795,7 +799,9 @@ class DataSet(Sized):
         values = [[d.get(k, None) for k in expected_keys] for d in results]
 
         if self._bg_writer.is_alive():
-            item = {'keys': list(expected_keys), 'values': values}
+            item = {'table': self.table_name,
+                    'keys': list(expected_keys),
+                    'values': values}
             self._data_write_queue.put(item)
         else:
             insert_many_values(self.conn, self.table_name, list(expected_keys),
@@ -819,7 +825,9 @@ class DataSet(Sized):
         expected_keys = frozenset.union(*[frozenset(d) for d in results])
         values = [[d.get(k, None) for k in expected_keys] for d in results]
 
-        item = {'keys': list(expected_keys), 'values': values}
+        item = {'table': self.table_name,
+                'keys': list(expected_keys),
+                'values': values}
         self._data_write_queue.put(item)
 
     def terminate_queue(self) -> None:
@@ -1353,6 +1361,7 @@ def load_by_counter(counter: int, exp_id: int,
 
 
 def new_data_set(name: str,
+                 write_to_background: bool = False,
                  exp_id: Optional[int] = None,
                  specs: Optional[SPECS] = None,
                  values: Optional[VALUES] = None,
@@ -1365,6 +1374,7 @@ def new_data_set(name: str,
 
     Args:
         name: the name of the new dataset
+        write_to_background: if bg_writer should be active
         exp_id: the id of the experiments this dataset belongs to, defaults
             to the last experiment
         specs: list of parameters to create this dataset with
@@ -1377,7 +1387,8 @@ def new_data_set(name: str,
     # note that passing `conn` is a secret feature that is unfortunately used
     # in `Runner` to pass a connection from an existing `Experiment`.
     d = DataSet(path_to_db=None, run_id=None, conn=conn,
-                name=name, specs=specs, values=values,
+                name=name, write_in_background=write_to_background,
+                specs=specs, values=values,
                 metadata=metadata, exp_id=exp_id)
 
     return d
