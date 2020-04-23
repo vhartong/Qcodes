@@ -15,8 +15,8 @@ if TYPE_CHECKING:
 
 import numpy
 
-import qcodes.config
-import qcodes.dataset.descriptions.versioning.serialization as serial
+import qcodes
+from .descriptions.versioning import serialization as serial
 from qcodes.dataset.descriptions.dependencies import (DependencyError,
                                                       InterDependencies_)
 from qcodes.dataset.descriptions.param_spec import ParamSpec, ParamSpecBase
@@ -719,10 +719,6 @@ class DataSet(Sized):
             sub.done_callback()
         self.terminate_queue()
 
-    @deprecate(alternative='mark_completed')
-    def mark_complete(self) -> None:
-        self.mark_completed()
-
     @deprecate(alternative='add_results')
     def add_result(self, results: Mapping[str, VALUE]) -> int:
         """
@@ -856,6 +852,8 @@ class DataSet(Sized):
                 valid_param_names.append(maybeParam)
         return valid_param_names
 
+    @deprecate('This method does not accurately represent the dataset.',
+               'Use `get_parameter_data` instead.')
     def get_data(self,
                  *params: Union[str, ParamSpec, _BaseParameter],
                  start: Optional[int] = None,
@@ -1079,6 +1077,8 @@ class DataSet(Sized):
                 df_to_save = pd.concat(dfs_to_save, axis=1)
                 df_to_save.to_csv(path_or_buf=dst, header=False, sep='\t')
 
+    @deprecate('This method does not accurately represent the dataset.',
+               'Use `get_parameter_data` instead.')
     def get_values(self, param_name: str) -> List[List[Any]]:
         """
         Get the values (i.e. not NULLs) of the specified parameter

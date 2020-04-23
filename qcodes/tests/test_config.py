@@ -12,9 +12,9 @@ from unittest import TestCase
 from typing import Optional
 import pytest
 import tempfile
-import qcodes.config
+import qcodes
 
-from qcodes.config import Config
+from qcodes.configuration import Config
 
 VALID_JSON = "{}"
 ENV_KEY = "/dev/random"
@@ -152,39 +152,39 @@ def default_config(user_config: Optional[str] = None):
     Args:
         user_config: represents the user config file content.
     """
-    home_file_name = qcodes.Config.home_file_name
-    schema_home_file_name = qcodes.Config.schema_home_file_name
-    env_file_name = qcodes.Config.env_file_name
-    schema_env_file_name = qcodes.Config.schema_env_file_name
-    cwd_file_name = qcodes.Config.cwd_file_name
-    schema_cwd_file_name = qcodes.Config.schema_cwd_file_name
+    home_file_name = Config.home_file_name
+    schema_home_file_name = Config.schema_home_file_name
+    env_file_name = Config.env_file_name
+    schema_env_file_name = Config.schema_env_file_name
+    cwd_file_name = Config.cwd_file_name
+    schema_cwd_file_name = Config.schema_cwd_file_name
 
-    qcodes.Config.home_file_name = ''
+    Config.home_file_name = ''
     with tempfile.TemporaryDirectory() as tmpdirname:
         file_name = os.path.join(tmpdirname, 'user_config.json')
         if user_config is not None:
             with open(file_name, 'w') as f:
                 f.write(user_config)
 
-        qcodes.Config.home_file_name = file_name
-        qcodes.Config.schema_home_file_name = ''
-        qcodes.Config.env_file_name = ''
-        qcodes.Config.schema_env_file_name = ''
-        qcodes.Config.cwd_file_name = ''
-        qcodes.Config.schema_cwd_file_name = ''
+        Config.home_file_name = file_name
+        Config.schema_home_file_name = ''
+        Config.env_file_name = ''
+        Config.schema_env_file_name = ''
+        Config.cwd_file_name = ''
+        Config.schema_cwd_file_name = ''
 
         default_config_obj = copy.deepcopy(qcodes.config)
-        qcodes.config = qcodes.Config()
+        qcodes.config = Config()
 
         try:
             yield
         finally:
-            qcodes.Config.home_file_name = home_file_name
-            qcodes.Config.schema_home_file_name = schema_home_file_name
-            qcodes.Config.env_file_name = env_file_name
-            qcodes.Config.schema_env_file_name = schema_env_file_name
-            qcodes.Config.cwd_file_name = cwd_file_name
-            qcodes.Config.schema_cwd_file_name = schema_cwd_file_name
+            Config.home_file_name = home_file_name
+            Config.schema_home_file_name = schema_home_file_name
+            Config.env_file_name = env_file_name
+            Config.schema_env_file_name = schema_env_file_name
+            Config.cwd_file_name = cwd_file_name
+            Config.schema_cwd_file_name = schema_cwd_file_name
 
             qcodes.config = default_config_obj
 
@@ -194,7 +194,7 @@ def side_effect(map, name):
 
 
 @pytest.fixture(scope="function")
-def path_to_config_file_on_disk():
+def path_to_config_file_on_disk(tmp_path):
 
     contents = {
         "core": {
@@ -211,13 +211,12 @@ def path_to_config_file_on_disk():
         }  # we omit a non-required section (stationconfigurator)
     }
 
-    with tempfile.TemporaryDirectory() as tmpdirname:
-        with open(os.path.join(tmpdirname, 'qcodesrc.json'), 'w') as f:
-            f.write(json.dumps(contents))
-        with open(os.path.join(tmpdirname, 'qcodesrc_schema.json'), 'w') as f:
-            f.write(json.dumps(SCHEMA))
+    with open(str(tmp_path / 'qcodesrc.json'), 'w') as f:
+        f.write(json.dumps(contents))
+    with open(str(tmp_path / 'qcodesrc_schema.json'), 'w') as f:
+        f.write(json.dumps(SCHEMA))
 
-        yield tmpdirname
+    yield str(tmp_path)
 
 
 class TestConfig(TestCase):

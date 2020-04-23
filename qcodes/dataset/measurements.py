@@ -35,7 +35,6 @@ from qcodes.utils.helpers import NumpyJSONEncoder
 from qcodes.utils.deprecate import deprecate
 import qcodes.utils.validators as vals
 from qcodes.utils.delaykeyboardinterrupt import DelayedKeyboardInterrupt
-import qcodes.config
 
 log = logging.getLogger(__name__)
 
@@ -52,22 +51,6 @@ setpoints_type = Sequence[Union[str, _BaseParameter]]
 
 class ParameterTypeError(Exception):
     pass
-
-
-@deprecate("This function is no longer used and will be removed soon.")
-def is_number(thing: Any) -> bool:
-    """
-    Test if an object can be converted to a float UNLESS it is a string or
-    complex.
-    """
-    if isinstance(thing, (str, complex, np.complex,
-                          np.complex128, np.complex64)):
-        return False
-    try:
-        float(thing)
-        return True
-    except (ValueError, TypeError):
-        return False
 
 
 class DataSaver:
@@ -100,7 +83,7 @@ class DataSaver:
                                     callback_kwargs={'run_id':
                                                      self._dataset.run_id,
                                                      'snapshot': snapshot})
-        default_subscribers = qcodes.config.subscription.default_subscribers
+        default_subscribers = qc.config.subscription.default_subscribers
         for subscriber in default_subscribers:
             self._dataset.subscribe_from_config(subscriber)
 
@@ -709,7 +692,8 @@ T = TypeVar('T', bound='Measurement')
 
 class Measurement:
     """
-    Measurement procedure container
+    Measurement procedure container. Note that multiple measurement
+    instances cannot be nested.
 
     Args:
         exp: Specify the experiment to use. If not given
